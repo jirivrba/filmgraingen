@@ -7,7 +7,7 @@ The grain is **different in every frame** (no static texture), creating a realis
 ---
 
 ## Features
-- Emulates **35mm film grain** with independent ASA100 / ASA200 / ASA400 / ASA800 film sensitivities.
+- Emulates **35mm film grain** with independent ASA100 / ASA125 / ASA200 / ASA400 / ASA500 / ASA800 film sensitivities.
 - Era styling via **LOOK80S** (default) or warm, flickery **LOOK70S**, combineable with any film sensitivity.
 - **Stochastic per-frame grain** → every frame has unique texture, no "dirty glass" effect.
 - Controls for **temporal coherence** (`--coherence`) to make grain evolve smoothly across time.
@@ -64,7 +64,7 @@ python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp
 - `--width` / `--height`: Output resolution (default 3840x2160).
 - `--fps`: Frames per second (default 24).
 - `--seconds`: Length of the sequence (default 10s).
-- `--film-sensitivity`: ASA stock (`ASA100`, `ASA200`, `ASA400`, `ASA800`). Alias: `--preset`.
+- `--film-sensitivity`: ASA stock (`ASA100`, `ASA125`, `ASA200`, `ASA400`, `ASA500`, `ASA800`).
 - `--look`: Era styling (`LOOK80S` default, `LOOK70S` for warmer, chunkier 1970s feel).
 - `--coherence`: Temporal coherence (0=every frame very different, 0.3=natural, 0.6=smoother evolution).
 - `--regen-every`: Regenerate a fresh grain base every N frames (default 1).
@@ -89,6 +89,18 @@ python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp
 
 - Classic 80s drama/comedy look:
   ```--film-sensitivity ASA200 --coherence 0.3```
+
+- Mid-speed daylight negative (ASA125):
+  ```--film-sensitivity ASA125 --coherence 0.35```
+
+- Tungsten stage/night interiors (ASA200):
+  ```--film-sensitivity ASA200 --coherence 0.28```
+
+- Gritty 80s night exteriors (ASA400):
+  ```--film-sensitivity ASA400 --coherence 0.25```
+
+- Modern high-speed negative (ASA500):
+  ```--film-sensitivity ASA500 --coherence 0.22```
 
 - Vintage 70s cinema warmth and flicker:
   ```--film-sensitivity ASA200 --look LOOK70S --coherence 0.25```

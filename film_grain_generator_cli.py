@@ -27,8 +27,55 @@ import argparse
 import subprocess
 import shutil
 import numpy as np
+from copy import deepcopy
 from pathlib import Path
 from typing import Tuple
+
+
+BASE_FILM_PROFILES = {
+    "ASA100": {
+        "diam_um_range": (8.0, 11.0),
+        "density_Mpx": 4400,
+        "channel_mul": (1.22, 1.0, 0.86),
+        "asa": 100,
+    },
+    "ASA125": {
+        "diam_um_range": (9.0, 13.5),
+        "density_Mpx": 4700,
+        "channel_mul": (1.2, 1.0, 0.88),
+        "asa": 125,
+    },
+    "ASA200": {
+        "diam_um_range": (11.0, 16.0),
+        "density_Mpx": 5200,
+        "channel_mul": (1.32, 1.0, 0.82),
+        "asa": 200,
+    },
+    "ASA400": {
+        "diam_um_range": (16.0, 22.0),
+        "density_Mpx": 6100,
+        "channel_mul": (1.4, 1.0, 0.78),
+        "asa": 400,
+    },
+    "ASA500": {
+        "diam_um_range": (18.0, 28.0),
+        "density_Mpx": 6800,
+        "channel_mul": (1.42, 1.0, 0.78),
+        "asa": 500,
+    },
+    "ASA800": {
+        "diam_um_range": (22.0, 30.0),
+        "density_Mpx": 7100,
+        "channel_mul": (1.48, 1.0, 0.74),
+        "asa": 800,
+    },
+}
+
+
+def build_profile(base_key: str, **overrides) -> dict:
+    profile = deepcopy(BASE_FILM_PROFILES[base_key])
+    profile.update(overrides)
+    return profile
 
 # -------------------------
 # Utils
@@ -93,26 +140,67 @@ class FilmGrainGenerator:
     GATE_WIDTH_MM = 21.95  # 35mm Academy approx. width
 
     FILM_SPEEDS = {
-        "ASA100": {
-            "diam_um_range": (8.0, 11.0),
-            "density_Mpx": 4400,
-            "channel_mul": (1.22, 1.0, 0.86)  # B, G, R
-        },
-        "ASA200": {
-            "diam_um_range": (11.0, 16.0),
-            "density_Mpx": 5200,
-            "channel_mul": (1.32, 1.0, 0.82)
-        },
-        "ASA400": {
-            "diam_um_range": (16.0, 22.0),
-            "density_Mpx": 6100,
-            "channel_mul": (1.4, 1.0, 0.78)
-        },
-        "ASA800": {
-            "diam_um_range": (22.0, 30.0),
-            "density_Mpx": 7100,
-            "channel_mul": (1.48, 1.0, 0.74)
-        },
+        "ASA100": build_profile("ASA100"),
+        "ASA125": build_profile("ASA125"),
+        "ASA200": build_profile("ASA200"),
+        "ASA400": build_profile("ASA400"),
+        "ASA500": build_profile("ASA500"),
+        "ASA800": build_profile("ASA800"),
+        "KODAK_EASTMAN_5247": build_profile(
+            "ASA125",
+            diam_um_range=(9.0, 13.0),
+            density_Mpx=4700,
+            channel_mul=(1.18, 1.0, 0.9),
+            look_overrides={
+                "tint_strength": 1.25,
+                "warmth_shift": (1.03, 1.0, 0.95),
+                "contrast": 0.94,
+                "shadow_boost": 1.08,
+                "channel_mul_scale": (1.05, 1.0, 0.96),
+            },
+        ),
+        "KODAK_EASTMAN_5293": build_profile(
+            "ASA200",
+            diam_um_range=(12.0, 18.0),
+            density_Mpx=5500,
+            channel_mul=(1.28, 1.0, 0.84),
+            look_overrides={
+                "tint_strength": 1.35,
+                "warmth_shift": (0.99, 1.0, 1.04),
+                "contrast": 0.9,
+                "shadow_boost": 1.12,
+                "density_scale": 1.08,
+                "channel_mul_scale": (1.08, 1.0, 0.9),
+            },
+        ),
+        "KODAK_EASTMAN_5294": build_profile(
+            "ASA400",
+            diam_um_range=(16.0, 23.0),
+            density_Mpx=6300,
+            channel_mul=(1.36, 1.0, 0.8),
+            look_overrides={
+                "tint_strength": 1.4,
+                "warmth_shift": (0.97, 1.0, 1.06),
+                "contrast": 0.88,
+                "shadow_boost": 1.18,
+                "density_scale": 1.12,
+                "channel_mul_scale": (1.12, 1.0, 0.88),
+            },
+        ),
+        "KODAK_VISION_500T": build_profile(
+            "ASA500",
+            diam_um_range=(20.0, 30.0),
+            density_Mpx=7000,
+            channel_mul=(1.44, 1.0, 0.76),
+            look_overrides={
+                "tint_strength": 1.5,
+                "warmth_shift": (1.02, 1.0, 0.92),
+                "contrast": 0.86,
+                "shadow_boost": 1.22,
+                "density_scale": 1.15,
+                "channel_mul_scale": (1.15, 1.0, 0.85),
+            },
+        ),
     }
 
     LOOK_PRESETS = {
@@ -159,7 +247,12 @@ class FilmGrainGenerator:
             raise ValueError(f"Unknown look preset: {self.look}")
 
         self.stock_cfg = self.FILM_SPEEDS[self.film_speed]
-        self.look_cfg = self.LOOK_PRESETS[self.look]
+        self.asa_rating = self.stock_cfg.get("asa")
+        base_look_cfg = dict(self.LOOK_PRESETS[self.look])
+        stock_overrides = self.stock_cfg.get("look_overrides", {})
+        if stock_overrides:
+            base_look_cfg.update(stock_overrides)
+        self.look_cfg = base_look_cfg
 
         self.tint_strength = float(self.look_cfg.get("tint_strength", 1.0))
         self.warmth_shift = np.array(self.look_cfg.get("warmth_shift", (1.0, 1.0, 1.0)),
@@ -392,7 +485,7 @@ def parse_args():
     p.add_argument('--film-sensitivity', '--preset', dest='film_speed',
                    choices=sorted(FilmGrainGenerator.FILM_SPEEDS.keys()),
                    default='ASA200',
-                   help='Photochemical stock sensitivity (ASA100 / ASA200 / ASA400 / ASA800).')
+                   help='Photochemical stock sensitivity preset (ASA100/125/200/400/500/800 or Kodak Eastman/Vision calibrations).')
     p.add_argument('--look', choices=sorted(FilmGrainGenerator.LOOK_PRESETS.keys()), default='LOOK80S',
                    help='Color/era styling to combine with film sensitivity (LOOK80S, LOOK70S).')
     p.add_argument('--seed', type=int, default=None, help='Random seed (None => different each run)')
