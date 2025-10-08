@@ -8,8 +8,9 @@ This version generates a NEW grain realization for EVERY FRAME (like real film),
 with controllable temporal coherence so changes feel organic rather than harsh.
 
 Usage examples:
-  python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 --seconds 10 --preset ASA250
-  python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp4 --fps 24 --seconds 10 --codec mp4v
+  python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 --seconds 10 --film-sensitivity ASA200
+  python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp4 \
+      --fps 24 --seconds 10 --film-sensitivity ASA200 --codec mp4v
   # Encode PNGs to ProRes 422 HQ via ffmpeg (after generating PNGs into --outdir):
   python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 --seconds 10 \
       --ffmpeg prores422hq
@@ -91,26 +92,54 @@ class FilmGrainGenerator:
 
     GATE_WIDTH_MM = 21.95  # 35mm Academy approx. width
 
-    ASA_PRESETS = {
+    FILM_SPEEDS = {
         "ASA100": {
-            "diam_um_range": (8.0, 12.0),
-            "density_Mpx": 4500,
-            "channel_mul": (1.25, 1.0, 0.85)  # B, G, R
+            "diam_um_range": (8.0, 11.0),
+            "density_Mpx": 4400,
+            "channel_mul": (1.22, 1.0, 0.86)  # B, G, R
         },
-        "ASA250": {
-            "diam_um_range": (12.0, 18.0),
-            "density_Mpx": 5500,
-            "channel_mul": (1.35, 1.0, 0.8)
+        "ASA200": {
+            "diam_um_range": (11.0, 16.0),
+            "density_Mpx": 5200,
+            "channel_mul": (1.32, 1.0, 0.82)
         },
-        "ASA500": {
-            "diam_um_range": (18.0, 25.0),
-            "density_Mpx": 6500,
-            "channel_mul": (1.45, 1.0, 0.75)
+        "ASA400": {
+            "diam_um_range": (16.0, 22.0),
+            "density_Mpx": 6100,
+            "channel_mul": (1.4, 1.0, 0.78)
+        },
+        "ASA800": {
+            "diam_um_range": (22.0, 30.0),
+            "density_Mpx": 7100,
+            "channel_mul": (1.48, 1.0, 0.74)
+        },
+    }
+
+    LOOK_PRESETS = {
+        "LOOK80S": {
+            "tint_strength": 1.0,
+            "warmth_shift": (1.0, 1.0, 1.0),
+            "flicker_mult": 1.0,
+            "shadow_boost": 1.0,
+            "contrast": 1.0,
+            "diameter_scale": 1.0,
+            "density_scale": 1.0,
+            "channel_mul_scale": (1.0, 1.0, 1.0)
+        },
+        "LOOK70S": {
+            "tint_strength": 1.35,
+            "warmth_shift": (1.08, 1.0, 0.92),
+            "flicker_mult": 1.35,
+            "shadow_boost": 1.2,
+            "contrast": 0.85,
+            "diameter_scale": 1.25,
+            "density_scale": 1.12,
+            "channel_mul_scale": (1.15, 1.05, 0.9)
         },
     }
 
     def __init__(self, width=3840, height=2160, fps=24, seconds=10,
-                 preset="ASA250", seed=None,
+                 film_speed="ASA200", look="LOOK80S", seed=None,
                  coherence=0.3,  # 0=new every frame (chaotic), 0.3=organic, 0.6=smoother
                  regen_every=1    # regenerate master every N frames (1 = per-frame)
                  ):
@@ -118,11 +147,34 @@ class FilmGrainGenerator:
         self.height = height
         self.fps = fps
         self.frames = int(round(fps * seconds))
-        self.preset = preset
+        self.film_speed = film_speed
+        self.look = look
         self.rng = np.random.default_rng(seed)
         self.um_per_px = (self.GATE_WIDTH_MM * 1000.0) / float(self.width)  # ~5.7 µm/px @ 3840
         self.coherence = float(np.clip(coherence, 0.0, 0.95))
         self.regen_every = max(1, int(regen_every))
+        if self.film_speed not in self.FILM_SPEEDS:
+            raise ValueError(f"Unknown film sensitivity preset: {self.film_speed}")
+        if self.look not in self.LOOK_PRESETS:
+            raise ValueError(f"Unknown look preset: {self.look}")
+
+        self.stock_cfg = self.FILM_SPEEDS[self.film_speed]
+        self.look_cfg = self.LOOK_PRESETS[self.look]
+
+        self.tint_strength = float(self.look_cfg.get("tint_strength", 1.0))
+        self.warmth_shift = np.array(self.look_cfg.get("warmth_shift", (1.0, 1.0, 1.0)),
+                                     dtype=np.float32)
+        if self.warmth_shift.shape != (3,):
+            raise ValueError("warmth_shift must be a triple of RGB multipliers")
+        self.flicker_mult = float(self.look_cfg.get("flicker_mult", 1.0))
+        self.shadow_boost_strength = float(self.look_cfg.get("shadow_boost", 1.0))
+        self.contrast_strength = float(self.look_cfg.get("contrast", 1.0))
+        self.diameter_scale = float(self.look_cfg.get("diameter_scale", 1.0))
+        self.density_scale = float(self.look_cfg.get("density_scale", 1.0))
+        self.channel_mul_scale = np.array(self.look_cfg.get("channel_mul_scale", (1.0, 1.0, 1.0)),
+                                          dtype=np.float32)
+        if self.channel_mul_scale.shape != (3,):
+            raise ValueError("channel_mul_scale must be a triple of multipliers")
         self._prepare_static_fields()
 
     def _prepare_static_fields(self):
@@ -156,9 +208,9 @@ class FilmGrainGenerator:
         """Generate one stochastic clumpy grain tile for a single color channel (float 0..1)."""
         h, w = self.height, self.width
         base = np.zeros((h, w), np.float32)
-        preset = self.ASA_PRESETS[self.preset]
-        diam_range_um = preset["diam_um_range"]
-        density = preset["density_Mpx"] * preset["channel_mul"][channel_index]
+        diam_range_um = tuple(d * self.diameter_scale for d in self.stock_cfg["diam_um_range"])
+        density = (self.stock_cfg["density_Mpx"] * self.density_scale *
+                   self.stock_cfg["channel_mul"][channel_index] * self.channel_mul_scale[channel_index])
         total_grains = int(density * (w*h/1e6))
 
         # Stratified positions ~ Poisson-disk-ish using jittered grid
@@ -194,7 +246,8 @@ class FilmGrainGenerator:
 
     def _temporal_params(self, t: int):
         """Return flicker/lift, gate weave and texture drift for frame t."""
-        flicker = 1.0 + 0.03 * math.sin(2*math.pi * t / (self.fps*1.7)) + self.rng.normal(0, 0.005)
+        flicker = 1.0 + (0.03 * self.flicker_mult) * math.sin(2*math.pi * t / (self.fps*1.7))
+        flicker += self.rng.normal(0, 0.005 * self.flicker_mult)
         lift =  0.0 + 0.015 * math.sin(2*math.pi * t / (self.fps*3.3)) + self.rng.normal(0, 0.003)
         gw_amp = 0.45
         dx = gw_amp * math.sin(2*math.pi * t / (self.fps*2.1)) + self.rng.normal(0, 0.05)
@@ -216,7 +269,8 @@ class FilmGrainGenerator:
 
         # Tone curve LUT (kept in float via np.interp)
         x = np.linspace(0, 1, 1024, dtype=np.float32)
-        s_curve = 1/(1 + np.exp(-8*(x-0.5)))
+        slope = max(1.0, 8 * self.contrast_strength)
+        s_curve = 1/(1 + np.exp(-slope*(x-0.5)))
         s_curve = (s_curve - s_curve.min()) / (s_curve.max()-s_curve.min())
 
         writer = None
@@ -246,8 +300,8 @@ class FilmGrainGenerator:
                 tx = int(ux) % self.width
                 ty = int(uy) % self.height
                 shifted = np.roll(np.roll(tile, shift=ty, axis=0), shift=tx, axis=1)
-                tint = 0.92 + 0.16 * (self.color_tint[..., ch] - 0.5)
-                layer = shifted * tint
+                tint = 0.92 + (0.16 * self.tint_strength) * (self.color_tint[..., ch] - 0.5)
+                layer = shifted * tint * self.warmth_shift[ch]
                 frame[..., ch] = layer
 
             # Vignette (broadcast over channels)
@@ -259,7 +313,7 @@ class FilmGrainGenerator:
 
             # Shadow-weighted grain (stronger in low luma)
             luma = 0.114*frame[...,0] + 0.587*frame[...,1] + 0.299*frame[...,2]
-            shadow_boost = 1.0 + 0.35*(1.0 - luma)
+            shadow_boost = 1.0 + (0.35 * self.shadow_boost_strength)*(1.0 - luma)
             frame *= shadow_boost[..., None]
 
             # Gate weave (subpixel jitter + micro-rotation per channel)
@@ -330,12 +384,17 @@ def maybe_encode_with_ffmpeg(out_dir: str, fps: int, mode: str, ffmpeg_bin: str 
 # -------------------------
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Film Grain Generator – 35mm 80s look (per-frame stochastic)")
+    p = argparse.ArgumentParser(description="Film Grain Generator – 35mm film stocks with eras")
     p.add_argument('--width', type=int, default=3840)
     p.add_argument('--height', type=int, default=2160)
     p.add_argument('--fps', type=int, default=24)
     p.add_argument('--seconds', type=float, default=10)
-    p.add_argument('--preset', choices=['ASA100','ASA250','ASA500'], default='ASA250')
+    p.add_argument('--film-sensitivity', '--preset', dest='film_speed',
+                   choices=sorted(FilmGrainGenerator.FILM_SPEEDS.keys()),
+                   default='ASA200',
+                   help='Photochemical stock sensitivity (ASA100 / ASA200 / ASA400 / ASA800).')
+    p.add_argument('--look', choices=sorted(FilmGrainGenerator.LOOK_PRESETS.keys()), default='LOOK80S',
+                   help='Color/era styling to combine with film sensitivity (LOOK80S, LOOK70S).')
     p.add_argument('--seed', type=int, default=None, help='Random seed (None => different each run)')
 
     p.add_argument('--coherence', type=float, default=0.3,
@@ -357,7 +416,7 @@ def parse_args():
 def main():
     args = parse_args()
     gen = FilmGrainGenerator(width=args.width, height=args.height, fps=args.fps,
-                             seconds=args.seconds, preset=args.preset, seed=args.seed,
+                             seconds=args.seconds, film_speed=args.film_speed, look=args.look, seed=args.seed,
                              coherence=args.coherence, regen_every=args.regen_every)
     if args.export == 'video':
         print(f"Exporting direct video to {args.video_path} (fourcc={args.codec})…")

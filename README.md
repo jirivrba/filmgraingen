@@ -7,7 +7,8 @@ The grain is **different in every frame** (no static texture), creating a realis
 ---
 
 ## Features
-- Emulates **35mm film grain** with ASA100 / ASA250 / ASA500 presets.
+- Emulates **35mm film grain** with independent ASA100 / ASA200 / ASA400 / ASA800 film sensitivities.
+- Era styling via **LOOK80S** (default) or warm, flickery **LOOK70S**, combineable with any film sensitivity.
 - **Stochastic per-frame grain** → every frame has unique texture, no "dirty glass" effect.
 - Controls for **temporal coherence** (`--coherence`) to make grain evolve smoothly across time.
 - Supports **PNG sequence export** or **direct video export** via OpenCV.
@@ -41,17 +42,19 @@ The grain is **different in every frame** (no static texture), creating a realis
 
 ### Generate PNG sequence (recommended for ProRes)
 ```bash
-python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 --seconds 10 --preset ASA250
+python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 --seconds 10 --film-sensitivity ASA200
 ```
 
 ### Encode PNGs to ProRes 422 HQ
 ```bash
-python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 --seconds 10   --preset ASA250 --ffmpeg prores422hq
+python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 --seconds 10 \
+    --film-sensitivity ASA200 --ffmpeg prores422hq
 ```
 
 ### Direct video export (MP4/H.264)
 ```bash
-python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp4   --fps 24 --seconds 10 --preset ASA250 --codec mp4v
+python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp4 \
+    --fps 24 --seconds 10 --film-sensitivity ASA200 --codec mp4v
 ```
 
 ---
@@ -61,7 +64,8 @@ python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp
 - `--width` / `--height`: Output resolution (default 3840x2160).
 - `--fps`: Frames per second (default 24).
 - `--seconds`: Length of the sequence (default 10s).
-- `--preset`: ASA stock (`ASA100`, `ASA250`, `ASA500`).
+- `--film-sensitivity`: ASA stock (`ASA100`, `ASA200`, `ASA400`, `ASA800`). Alias: `--preset`.
+- `--look`: Era styling (`LOOK80S` default, `LOOK70S` for warmer, chunkier 1970s feel).
 - `--coherence`: Temporal coherence (0=every frame very different, 0.3=natural, 0.6=smoother evolution).
 - `--regen-every`: Regenerate a fresh grain base every N frames (default 1).
 - `--export`: `png` (sequence) or `video` (direct mp4).
@@ -80,14 +84,20 @@ python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp
 
 ## Examples
 
-- Clean daylight film (low grain):  
-  ```--preset ASA100 --coherence 0.5```
+- Clean daylight film (low grain):
+  ```--film-sensitivity ASA100 --coherence 0.5```
 
-- Classic 80s drama/comedy look:  
-  ```--preset ASA250 --coherence 0.3```
+- Classic 80s drama/comedy look:
+  ```--film-sensitivity ASA200 --coherence 0.3```
 
-- Dark noir / night shots (grainy):  
-  ```--preset ASA500 --coherence 0.2```
+- Vintage 70s cinema warmth and flicker:
+  ```--film-sensitivity ASA200 --look LOOK70S --coherence 0.25```
+
+- 70s look on a faster, grainier stock:
+  ```--film-sensitivity ASA400 --look LOOK70S --coherence 0.2```
+
+- Dark noir / night shots (grainy):
+  ```--film-sensitivity ASA800 --coherence 0.2```
 
 ---
 
