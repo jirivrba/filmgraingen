@@ -1,5 +1,5 @@
 
-# Film Grain Generator (35mm 80s Look)
+# Film Grain Generator (35mm 70s, 80s Look)
 
 This Python tool generates **4K film grain overlays** that emulate photochemical film stock from the 1980s. 
 The grain is **different in every frame** (no static texture), creating a realistic organic look suitable for overlay in editing software like Final Cut Pro X, DaVinci Resolve, Premiere Pro, etc.
