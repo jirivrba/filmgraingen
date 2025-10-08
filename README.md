@@ -105,3 +105,9 @@ python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp
 - Each run produces **unique grain** unless you fix `--seed`.
 - PNG+ProRes workflow gives the **highest quality** (10-bit, editing friendly).
 - H.264 export is lighter but less faithful for fine grain.
+
+---
+
+## License
+
+This project is released into the public domain via [The Unlicense](LICENSE), allowing unrestricted use, modification, and distribution.
