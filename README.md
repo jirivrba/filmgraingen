@@ -79,6 +79,31 @@ python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp
 
 ---
 
+## How the profile system works
+
+The CLI separates the creative controls into two layers:
+
+1. **Film sensitivity / stock (`--film-sensitivity`)** – defines the *physical* behavior of the grain.
+   - Each ASA preset sets the silver-halide grain diameter range, grain density, and base RGB layer balance.
+   - Special Kodak presets (e.g. `KODAK_EASTMAN_5294`) start from the closest ASA profile and then tweak the
+     technical values to match the historical stock.
+2. **Look (`--look`)** – defines the *stylistic* finishing pass.
+   - Presets such as `LOOK80S` or `LOOK70S` control warmth, tint strength, contrast curve, flicker intensity,
+     and how strongly shadows carry grain.
+
+When you pick one of the Kodak stocks you still choose a look as the creative base. The generator first loads the
+look preset you requested and then applies the film-stock overrides on top of it. This means that
+`KODAK_EASTMAN_5294 + LOOK80S` is valid: you get the physical grain characteristics of 5294 combined with the
+general 80s palette, and the Kodak profile supplies additional adjustments (contrast, tint, density) so that the
+result matches the real stock.
+
+If you want the Kodak stock “as photographed” without extra era stylisation, select the stock and keep the look at
+`LOOK80S` (neutral) which already contains the manufacturer's overrides. Switching the look to `LOOK70S` layers the
+warmer/flickery 70s grade over the same physical grain behaviour, which can be useful when you want the 5294 grain
+but with a different era tint.
+
+---
+
 ## Workflow in FCPX / Resolve / Premiere
 
 1. Import the generated ProRes/H.264 clip (or PNG sequence).

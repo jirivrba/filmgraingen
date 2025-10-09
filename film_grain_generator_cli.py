@@ -144,7 +144,7 @@ class FilmGrainGenerator:
 
     GATE_WIDTH_MM = 21.95  # 35mm Academy approx. width
 
-    FILM_SPEEDS = {
+    FILM_STOCK_PROFILES = {
         "ASA100": build_profile("ASA100"),
         "ASA125": build_profile("ASA125"),
         "ASA200": build_profile("ASA200"),
@@ -253,12 +253,12 @@ class FilmGrainGenerator:
         self.um_per_px = (self.GATE_WIDTH_MM * 1000.0) / float(self.width)  # ~5.7 µm/px @ 3840
         self.coherence = float(np.clip(coherence, 0.0, 0.95))
         self.regen_every = max(1, int(regen_every))
-        if self.film_speed not in self.FILM_SPEEDS:
+        if self.film_speed not in self.FILM_STOCK_PROFILES:
             raise ValueError(f"Unknown film sensitivity preset: {self.film_speed}")
         if self.look not in self.LOOK_PRESETS:
             raise ValueError(f"Unknown look preset: {self.look}")
 
-        self.stock_cfg = self.FILM_SPEEDS[self.film_speed]
+        self.stock_cfg = self.FILM_STOCK_PROFILES[self.film_speed]
         self.asa_rating = self.stock_cfg.get("asa")
         base_look_cfg = dict(self.LOOK_PRESETS[self.look])
         stock_overrides = self.stock_cfg.get("look_overrides", {})
@@ -526,7 +526,7 @@ def parse_args():
     p.add_argument('--seconds', type=float, default=None,
                    help='[Deprecated] Alias for --loop-seconds for backwards compatibility.')
     p.add_argument('--film-sensitivity', '--preset', dest='film_speed',
-                   choices=sorted(FilmGrainGenerator.FILM_SPEEDS.keys()),
+                   choices=sorted(FilmGrainGenerator.FILM_STOCK_PROFILES.keys()),
                    default='ASA200',
                    help='Photochemical stock sensitivity preset (ASA100/125/200/400/500/800 or Kodak Eastman/Vision calibrations).')
     p.add_argument('--look', choices=sorted(FilmGrainGenerator.LOOK_PRESETS.keys()), default='LOOK80S',
