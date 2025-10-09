@@ -255,11 +255,13 @@ class FilmGrainGenerator:
                  loop_count=1, seconds=None,
                  film_speed="ASA200", look="LOOK80S", seed=None,
                  coherence=0.3,  # 0=new every frame (chaotic), 0.3=organic, 0.6=smoother
-                 regen_every=1    # regenerate master every N frames (1 = per-frame)
+                 regen_every=1,    # regenerate master every N frames (1 = per-frame)
+                 debug=False
                  ):
         self.width = width
         self.height = height
         self.fps = fps
+        self.debug = bool(debug)
         # backwards compatibility: `seconds` overrides loop_seconds when provided
         if seconds is not None:
             loop_seconds = seconds
@@ -300,7 +302,20 @@ class FilmGrainGenerator:
                                           dtype=np.float32)
         if self.channel_mul_scale.shape != (3,):
             raise ValueError("channel_mul_scale must be a triple of multipliers")
+        self._debug(
+            "Initialized generator: %dx%d @ %dfps, loop %.2fs x%d (total frames %d), "
+            "film %s, look %s, coherence %.2f, regen_every %d"
+            % (
+                self.width, self.height, self.fps,
+                self.loop_seconds, self.loop_count, self.frames,
+                self.film_speed, self.look, self.coherence, self.regen_every,
+            )
+        )
         self._prepare_static_fields()
+
+    def _debug(self, message: str):
+        if self.debug:
+            print(f"[DEBUG] {message}")
 
     def _prepare_static_fields(self):
         """Static modulation fields shared across frames: clump modulation, tint, vignette."""
@@ -318,6 +333,14 @@ class FilmGrainGenerator:
         ny = (yy - self.height/2) / (self.height/2)
         r2 = nx*nx + ny*ny
         self.vignette = np.clip(1.0 - 0.15*r2, 0.85, 1.0).astype(np.float32)
+        self._debug(
+            "Prepared static fields: clump_mod[%.3f..%.3f], tint per-channel means %s"
+            % (
+                float(self.clump_mod.min()),
+                float(self.clump_mod.max()),
+                np.array2string(self.color_tint.mean(axis=(0, 1)), precision=3),
+            )
+        )
 
     def _sample_size_pixels(self, diam_range_um):
         lo, hi = diam_range_um
@@ -337,6 +360,16 @@ class FilmGrainGenerator:
         density = (self.stock_cfg["density_Mpx"] * self.density_scale *
                    self.stock_cfg["channel_mul"][channel_index] * self.channel_mul_scale[channel_index])
         total_grains = int(density * (w*h/1e6))
+        self._debug(
+            "Channel %d tile: diam range %.2f-%.2fµm (scale %.2f), target grains %d"
+            % (
+                channel_index,
+                diam_range_um[0],
+                diam_range_um[1],
+                self.diameter_scale,
+                total_grains,
+            )
+        )
 
         # Stratified positions ~ Poisson-disk-ish using jittered grid
         grid = int(max(64, round(math.sqrt(total_grains))))
@@ -367,6 +400,10 @@ class FilmGrainGenerator:
         # Optics/scanner slight blur and normalization
         base = cv2.GaussianBlur(base, (3,3), 0.8)
         base = (base - base.min()) / (base.max() - base.min() + 1e-8)
+        self._debug(
+            "Channel %d tile prepared (min %.3f max %.3f)"
+            % (channel_index, float(base.min()), float(base.max()))
+        )
         return base
 
     def _temporal_params(self, t: int):
@@ -409,15 +446,22 @@ class FilmGrainGenerator:
 
         # Pre-calculate digits for PNG naming when exporting long loops
         digits = max(4, int(math.log10(self.frames))+1 if self.frames > 0 else 4)
+        target_desc = f"video → {video_path} ({fourcc_str})" if as_video else f"PNGs in {out_dir_str}"
+        self._debug(
+            "Starting render: %s, total_frames=%d, loop_frames=%d, digits=%d"
+            % (target_desc, self.frames, self.loop_frames, digits)
+        )
 
         # Store RNG state so we can re-run the same loop seamlessly
         initial_rng_state = deepcopy(self.rng.bit_generator.state)
         # Cache of the first frames (float16) used for end-of-loop blending
         blend_frames = min(self.loop_frames, max(2, int(round(self.fps * 0.5))))
+        self._debug(f"Loop blend frames: {blend_frames}")
         first_loop_cache = [None] * blend_frames
 
         frame_index = 0
         for loop_idx in range(self.loop_count):
+            self._debug(f"Loop {loop_idx+1}/{self.loop_count} starting")
             # Reset random generator to start-of-loop state
             self.rng.bit_generator.state = deepcopy(initial_rng_state)
             # Initialize previous grain tiles for temporal coherence blending
@@ -429,9 +473,11 @@ class FilmGrainGenerator:
 
                 # Generate (or regenerate) tiles and blend with previous to control coherence
                 if t % self.regen_every == 0:
+                    self._debug(f"Frame {frame_index}: regenerating grain tiles (t={t})")
                     new_tiles = [self._generate_grain_tile_once(ch) for ch in range(3)]
-            else:
-                new_tiles = prev_tiles  # between regen intervals, reuse (still moved by drift)
+                else:
+                    new_tiles = prev_tiles  # between regen intervals, reuse (still moved by drift)
+                    self._debug(f"Frame {frame_index}: reusing previous tiles (t={t})")
 
             for ch in range(3):
                 # Temporal coherence mixing: more previous => smoother, less => more stochastic
@@ -495,10 +541,15 @@ class FilmGrainGenerator:
                             cv2.cvtColor(rgb8, cv2.COLOR_RGB2BGR))
 
             frame_index += 1
+            if self.debug and (
+                frame_index % max(1, self.fps) == 0 or frame_index == self.frames
+            ):
+                self._debug(f"Exported frame {frame_index}/{self.frames}")
 
         if writer is not None:
             writer.release()
 
+        self._debug(f"Render complete. Frames written: {frame_index}")
         return out_dir_str
 
 # -------------------------
@@ -580,6 +631,7 @@ def parse_args():
     p.add_argument('--ffmpeg', choices=['none','prores422hq','prores4444','h264'], default='none',
                    help='After PNG export, optionally encode to a video via ffmpeg')
     p.add_argument('--ffmpeg-bin', default='ffmpeg', help='Custom ffmpeg binary name/path')
+    p.add_argument('--debug', action='store_true', help='Enable verbose debug logging to stdout')
     return p.parse_args()
 
 
@@ -587,10 +639,13 @@ def main():
     args = parse_args()
     loop_seconds = args.loop_seconds if args.loop_seconds is not None else (
         args.seconds if args.seconds is not None else 10.0)
+    if args.debug:
+        print("Debug logging enabled.")
     gen = FilmGrainGenerator(width=args.width, height=args.height, fps=args.fps,
                              loop_seconds=loop_seconds, loop_count=args.loop_count, seconds=None,
                              film_speed=args.film_speed, look=args.look, seed=args.seed,
-                             coherence=args.coherence, regen_every=args.regen_every)
+                             coherence=args.coherence, regen_every=args.regen_every,
+                             debug=args.debug)
     if args.export == 'video':
         print(f"Exporting direct video to {args.video_path} (fourcc={args.codec})…")
         _ = gen.render(out_dir=args.outdir, as_video=True, video_path=args.video_path, fourcc_str=args.codec)
