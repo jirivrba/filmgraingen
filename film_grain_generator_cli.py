@@ -414,7 +414,7 @@ class FilmGrainGenerator:
         initial_rng_state = deepcopy(self.rng.bit_generator.state)
         # Cache of the first frames (float16) used for end-of-loop blending
         blend_frames = min(self.loop_frames, max(2, int(round(self.fps * 0.5))))
-        first_loop_cache = []
+        first_loop_cache = [None] * blend_frames
 
         frame_index = 0
         for loop_idx in range(self.loop_count):
@@ -468,14 +468,22 @@ class FilmGrainGenerator:
 
             # Cache first frames for blending at the end of the loop to guarantee seamless looping
             if loop_idx == 0 and t < blend_frames:
-                first_loop_cache.append(frame.astype(np.float16, copy=True))
+                first_loop_cache[t] = frame.astype(np.float16, copy=True)
 
             # Blend the tail of the loop back into the cached first frames (perfect loop)
             if blend_frames > 0 and t >= self.loop_frames - blend_frames:
                 idx = t - (self.loop_frames - blend_frames)
                 alpha = (idx + 1) / float(blend_frames)
-                target = first_loop_cache[idx].astype(np.float32)
-                frame = frame * (1.0 - alpha) + target * alpha
+                if 0 <= idx < len(first_loop_cache):
+                    cached = first_loop_cache[idx]
+                    if cached is not None:
+                        target = cached.astype(np.float32)
+                        frame = frame * (1.0 - alpha) + target * alpha
+                    elif loop_idx == 0:
+                        # Edge-case: extremely short loops where the cache has not yet been
+                        # populated (overlap between head/tail). Store the current frame so
+                        # subsequent loops can still blend seamlessly.
+                        first_loop_cache[idx] = frame.astype(np.float16, copy=True)
 
             # Export
             if writer is not None:
