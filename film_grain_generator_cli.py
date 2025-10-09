@@ -479,72 +479,72 @@ class FilmGrainGenerator:
                     new_tiles = prev_tiles  # between regen intervals, reuse (still moved by drift)
                     self._debug(f"Frame {frame_index}: reusing previous tiles (t={t})")
 
-            for ch in range(3):
-                # Temporal coherence mixing: more previous => smoother, less => more stochastic
-                tile = (1.0 - self.coherence) * new_tiles[ch] + self.coherence * prev_tiles[ch]
-                prev_tiles[ch] = tile  # carry forward blended state (evolves over time)
+                for ch in range(3):
+                    # Temporal coherence mixing: more previous => smoother, less => more stochastic
+                    tile = (1.0 - self.coherence) * new_tiles[ch] + self.coherence * prev_tiles[ch]
+                    prev_tiles[ch] = tile  # carry forward blended state (evolves over time)
 
-                # Apply slow drift (wrap) and gentle color tint per channel
-                tx = int(round(ux)) % self.width
-                ty = int(round(uy)) % self.height
-                shifted = np.roll(np.roll(tile, shift=ty, axis=0), shift=tx, axis=1)
-                tint = 0.92 + (0.16 * self.tint_strength) * (self.color_tint[..., ch] - 0.5)
-                layer = shifted * tint * self.warmth_shift[ch]
-                frame[..., ch] = layer
+                    # Apply slow drift (wrap) and gentle color tint per channel
+                    tx = int(round(ux)) % self.width
+                    ty = int(round(uy)) % self.height
+                    shifted = np.roll(np.roll(tile, shift=ty, axis=0), shift=tx, axis=1)
+                    tint = 0.92 + (0.16 * self.tint_strength) * (self.color_tint[..., ch] - 0.5)
+                    layer = shifted * tint * self.warmth_shift[ch]
+                    frame[..., ch] = layer
 
-            # Vignette (broadcast over channels)
-            frame *= self.vignette[..., None]
+                # Vignette (broadcast over channels)
+                frame *= self.vignette[..., None]
 
-            # Film-like S-curve, flicker/lift
-            frame = np.interp(frame, x, s_curve).astype(np.float32)
-            frame = frame * flicker + lift
+                # Film-like S-curve, flicker/lift
+                frame = np.interp(frame, x, s_curve).astype(np.float32)
+                frame = frame * flicker + lift
 
-            # Shadow-weighted grain (stronger in low luma)
-            luma = 0.114*frame[...,0] + 0.587*frame[...,1] + 0.299*frame[...,2]
-            shadow_boost = 1.0 + (0.35 * self.shadow_boost_strength)*(1.0 - luma)
-            frame *= shadow_boost[..., None]
+                # Shadow-weighted grain (stronger in low luma)
+                luma = 0.114*frame[...,0] + 0.587*frame[...,1] + 0.299*frame[...,2]
+                shadow_boost = 1.0 + (0.35 * self.shadow_boost_strength)*(1.0 - luma)
+                frame *= shadow_boost[..., None]
 
-            # Gate weave (subpixel jitter + micro-rotation per channel)
-            for ch in range(3):
-                frame[..., ch] = self._apply_affine(frame[..., ch], dx, dy, rot)
+                # Gate weave (subpixel jitter + micro-rotation per channel)
+                for ch in range(3):
+                    frame[..., ch] = self._apply_affine(frame[..., ch], dx, dy, rot)
 
-            # Subtle per-frame sparkle to avoid banding/over-correlation (deterministic per loop)
-            sparkle = self.rng.normal(0, 0.006, frame.shape).astype(np.float32)
-            frame = np.clip(frame + sparkle, 0.0, 1.0)
+                # Subtle per-frame sparkle to avoid banding/over-correlation (deterministic per loop)
+                sparkle = self.rng.normal(0, 0.006, frame.shape).astype(np.float32)
+                frame = np.clip(frame + sparkle, 0.0, 1.0)
 
-            # Cache first frames for blending at the end of the loop to guarantee seamless looping
-            if loop_idx == 0 and t < blend_frames:
-                first_loop_cache[t] = frame.astype(np.float16, copy=True)
+                # Cache first frames for blending at the end of the loop to guarantee seamless looping
+                if loop_idx == 0 and t < blend_frames:
+                    first_loop_cache[t] = frame.astype(np.float16, copy=True)
 
-            # Blend the tail of the loop back into the cached first frames (perfect loop)
-            if blend_frames > 0 and t >= self.loop_frames - blend_frames:
-                idx = t - (self.loop_frames - blend_frames)
-                alpha = (idx + 1) / float(blend_frames)
-                if 0 <= idx < len(first_loop_cache):
-                    cached = first_loop_cache[idx]
-                    if cached is not None:
-                        target = cached.astype(np.float32)
-                        frame = frame * (1.0 - alpha) + target * alpha
-                    elif loop_idx == 0:
-                        # Edge-case: extremely short loops where the cache has not yet been
-                        # populated (overlap between head/tail). Store the current frame so
-                        # subsequent loops can still blend seamlessly.
-                        first_loop_cache[idx] = frame.astype(np.float16, copy=True)
+                # Blend the tail of the loop back into the cached first frames (perfect loop)
+                if blend_frames > 0 and t >= self.loop_frames - blend_frames:
+                    idx = t - (self.loop_frames - blend_frames)
+                    alpha = (idx + 1) / float(blend_frames)
+                    if 0 <= idx < len(first_loop_cache):
+                        cached = first_loop_cache[idx]
+                        if cached is not None:
+                            target = cached.astype(np.float32)
+                            frame = frame * (1.0 - alpha) + target * alpha
+                        elif loop_idx == 0:
+                            # Edge-case: extremely short loops where the cache has not yet been
+                            # populated (overlap between head/tail). Store the current frame so
+                            # subsequent loops can still blend seamlessly.
+                            first_loop_cache[idx] = frame.astype(np.float16, copy=True)
 
-            # Export
-            if writer is not None:
-                bgr8 = to_uint8(frame[..., ::-1])  # RGB->BGR
-                writer.write(bgr8)
-            else:
-                rgb8 = to_uint8(frame)
-                cv2.imwrite(os.path.join(out_dir_str, f"grain_{frame_index:0{digits}d}.png"),
-                            cv2.cvtColor(rgb8, cv2.COLOR_RGB2BGR))
+                # Export
+                if writer is not None:
+                    bgr8 = to_uint8(frame[..., ::-1])  # RGB->BGR
+                    writer.write(bgr8)
+                else:
+                    rgb8 = to_uint8(frame)
+                    cv2.imwrite(os.path.join(out_dir_str, f"grain_{frame_index:0{digits}d}.png"),
+                                cv2.cvtColor(rgb8, cv2.COLOR_RGB2BGR))
 
-            frame_index += 1
-            if self.debug and (
-                frame_index % max(1, self.fps) == 0 or frame_index == self.frames
-            ):
-                self._debug(f"Exported frame {frame_index}/{self.frames}")
+                frame_index += 1
+                if self.debug and (
+                    frame_index % max(1, self.fps) == 0 or frame_index == self.frames
+                ):
+                    self._debug(f"Exported frame {frame_index}/{self.frames}")
 
         if writer is not None:
             writer.release()
