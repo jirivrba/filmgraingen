@@ -8,8 +8,9 @@ This version generates a NEW grain realization for EVERY FRAME (like real film),
 with controllable temporal coherence so changes feel organic rather than harsh.
 
 The generator can now render **perfectly looping grain segments** using
-`--loop-seconds` and repeat them any number of times via `--loop-count`, making
-it easy to build long overlays without visible seams.
+`--loop-seconds`. When exporting video (directly or via ffmpeg),
+`--loop-count` repeats the seamless loop without regenerating extra PNG frames,
+making it easy to build long overlays without visible seams.
 
 Usage examples:
   python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 \
@@ -268,7 +269,7 @@ class FilmGrainGenerator:
         self.loop_seconds = max(0.01, float(loop_seconds))
         self.loop_count = max(1, int(loop_count))
         self.loop_frames = max(1, int(round(self.fps * self.loop_seconds)))
-        self.frames = self.loop_frames * self.loop_count
+        self.total_frames = self.loop_frames * self.loop_count
         self.film_speed = film_speed
         self.look = look
         self.rng = np.random.default_rng(seed)
@@ -307,7 +308,7 @@ class FilmGrainGenerator:
             "film %s, look %s, coherence %.2f, regen_every %d"
             % (
                 self.width, self.height, self.fps,
-                self.loop_seconds, self.loop_count, self.frames,
+                self.loop_seconds, self.loop_count, self.total_frames,
                 self.film_speed, self.look, self.coherence, self.regen_every,
             )
         )
@@ -433,6 +434,15 @@ class FilmGrainGenerator:
         if out_dir_str != out_dir:
             print(f"Output directory '{out_dir}' exists. Using '{out_dir_str}' for this run.")
 
+        loops_to_render = self.loop_count if as_video else 1
+        frames_expected = self.loop_frames * loops_to_render
+
+        if not as_video and self.loop_count > 1:
+            print(
+                "PNG export writes a single seamless loop. "
+                "Additional repeats will be handled during encoding."
+            )
+
         # Tone curve LUT (kept in float via np.interp)
         x = np.linspace(0, 1, 1024, dtype=np.float32)
         slope = max(1.0, 8 * self.contrast_strength)
@@ -445,11 +455,11 @@ class FilmGrainGenerator:
             writer = cv2.VideoWriter(video_path, fourcc, self.fps, (self.width, self.height))
 
         # Pre-calculate digits for PNG naming when exporting long loops
-        digits = max(4, int(math.log10(self.frames))+1 if self.frames > 0 else 4)
+        digits = max(4, int(math.log10(frames_expected))+1 if frames_expected > 0 else 4)
         target_desc = f"video → {video_path} ({fourcc_str})" if as_video else f"PNGs in {out_dir_str}"
         self._debug(
-            "Starting render: %s, total_frames=%d, loop_frames=%d, digits=%d"
-            % (target_desc, self.frames, self.loop_frames, digits)
+            "Starting render: %s, frames_to_render=%d, loop_frames=%d, digits=%d"
+            % (target_desc, frames_expected, self.loop_frames, digits)
         )
 
         # Store RNG state so we can re-run the same loop seamlessly
@@ -460,8 +470,8 @@ class FilmGrainGenerator:
         first_loop_cache = [None] * blend_frames
 
         frame_index = 0
-        for loop_idx in range(self.loop_count):
-            self._debug(f"Loop {loop_idx+1}/{self.loop_count} starting")
+        for loop_idx in range(loops_to_render):
+            self._debug(f"Loop {loop_idx+1}/{loops_to_render} starting")
             # Reset random generator to start-of-loop state
             self.rng.bit_generator.state = deepcopy(initial_rng_state)
             # Initialize previous grain tiles for temporal coherence blending
@@ -542,24 +552,26 @@ class FilmGrainGenerator:
 
                 frame_index += 1
                 if self.debug and (
-                    frame_index % max(1, self.fps) == 0 or frame_index == self.frames
+                    frame_index % max(1, self.fps) == 0 or frame_index == frames_expected
                 ):
-                    self._debug(f"Exported frame {frame_index}/{self.frames}")
+                    self._debug(f"Exported frame {frame_index}/{frames_expected}")
 
         if writer is not None:
             writer.release()
 
-        self._debug(f"Render complete. Frames written: {frame_index}")
+        self._debug(f"Render complete. Frames written: {frame_index} (expected {frames_expected})")
         return out_dir_str
 
 # -------------------------
 # ffmpeg helper
 # -------------------------
 
-def maybe_encode_with_ffmpeg(out_dir: str, fps: int, mode: str, ffmpeg_bin: str = "ffmpeg"):
+def maybe_encode_with_ffmpeg(out_dir: str, fps: int, mode: str, loop_count: int = 1,
+                             ffmpeg_bin: str = "ffmpeg"):
     """
     Encode PNG sequence grain_%04d.png into a video in the same folder.
     mode ∈ {"none", "prores422hq", "prores4444", "h264"}
+    loop_count controls how many seamless repeats are baked into the encoded clip.
     """
     if mode == "none":
         return None
@@ -568,19 +580,23 @@ def maybe_encode_with_ffmpeg(out_dir: str, fps: int, mode: str, ffmpeg_bin: str 
         return None
 
     input_pattern = os.path.join(out_dir, "grain_%04d.png")
+    stream_loop = []
+    repeats = max(1, int(loop_count))
+    if repeats > 1:
+        stream_loop = ['-stream_loop', str(repeats - 1)]
     if mode == "prores422hq":
         out_path = os.path.join(out_dir, "film_grain_prores422HQ.mov")
-        cmd = [ffmpeg_bin, '-y', '-r', str(fps), '-i', input_pattern,
+        cmd = [ffmpeg_bin, '-y', *stream_loop, '-r', str(fps), '-i', input_pattern,
                '-c:v', 'prores_ks', '-profile:v', '3', '-pix_fmt', 'yuv422p10le',
                '-movflags', '+faststart', out_path]
     elif mode == "prores4444":
         out_path = os.path.join(out_dir, "film_grain_prores4444.mov")
-        cmd = [ffmpeg_bin, '-y', '-r', str(fps), '-i', input_pattern,
+        cmd = [ffmpeg_bin, '-y', *stream_loop, '-r', str(fps), '-i', input_pattern,
                '-c:v', 'prores_ks', '-profile:v', '4', '-pix_fmt', 'yuv444p10le',
                '-movflags', '+faststart', out_path]
     elif mode == "h264":
         out_path = os.path.join(out_dir, "film_grain_h264.mp4")
-        cmd = [ffmpeg_bin, '-y', '-r', str(fps), '-i', input_pattern,
+        cmd = [ffmpeg_bin, '-y', *stream_loop, '-r', str(fps), '-i', input_pattern,
                '-c:v', 'libx264', '-crf', '12', '-preset', 'slow', '-pix_fmt', 'yuv420p',
                '-movflags', '+faststart', out_path]
     else:
@@ -655,7 +671,10 @@ def main():
         actual_out_dir = gen.render(out_dir=args.outdir, as_video=False)
         print("PNG export done.")
         if args.ffmpeg != 'none':
-            out = maybe_encode_with_ffmpeg(actual_out_dir, args.fps, args.ffmpeg, ffmpeg_bin=args.ffmpeg_bin)
+            out = maybe_encode_with_ffmpeg(
+                actual_out_dir, args.fps, args.ffmpeg,
+                loop_count=args.loop_count, ffmpeg_bin=args.ffmpeg_bin
+            )
             if out:
                 print(f"Encoded via ffmpeg → {out}")
 

@@ -45,15 +45,18 @@ The grain is **different in every frame** (no static texture), creating a realis
 python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 \
     --loop-seconds 10 --loop-count 3 --film-sensitivity ASA200
 ```
-This command creates a **10-second seamless grain loop** and repeats it 3 times
-in the PNG sequence (30 seconds total, 720 frames at 24 fps) without any
-visible seams between loops.
+This command creates a **single 10-second seamless grain loop** (240 frames at
+24 fps). The loop is designed to repeat perfectly; additional repeats are baked
+in automatically when you export video (`--export video`) or encode with
+`--ffmpeg`.
 
 ### Encode PNGs to ProRes 422 HQ
 ```bash
 python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 \
     --loop-seconds 8 --loop-count 2 --film-sensitivity ASA200 --ffmpeg prores422hq
 ```
+The resulting ProRes clip will be 16 seconds long (the 8-second loop repeated
+twice) even though only the base loop is rendered to PNG.
 
 ### Direct video export (MP4/H.264)
 ```bash
@@ -68,7 +71,9 @@ python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp
 - `--width` / `--height`: Output resolution (default 3840x2160).
 - `--fps`: Frames per second (default 24).
 - `--loop-seconds`: Length of a single seamless loop (seconds, default 10s if not set).
-- `--loop-count`: How many times the loop is repeated in the output (default 1).
+- `--loop-count`: How many times the loop is repeated in encoded video outputs
+  (default 1). PNG export always renders a single seamless loop; the repeats are
+  applied when writing video directly or via ffmpeg.
 - `--seconds`: Deprecated alias for `--loop-seconds` to maintain backwards compatibility.
 - `--film-sensitivity`: ASA stock (`ASA100`, `ASA125`, `ASA200`, `ASA400`, `ASA500`, `ASA800`).
 - `--look`: Era styling (`LOOK80S` default, `LOOK70S` for warmer, chunkier 1970s feel).
