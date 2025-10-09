@@ -33,6 +33,7 @@ import subprocess
 import shutil
 import numpy as np
 from copy import deepcopy
+from itertools import count
 from pathlib import Path
 from typing import Tuple
 
@@ -86,8 +87,27 @@ def build_profile(base_key: str, **overrides) -> dict:
 # Utils
 # -------------------------
 
-def ensure_dir(p: str):
-    Path(p).mkdir(parents=True, exist_ok=True)
+def prepare_output_directory(p: str, require_unique: bool = True) -> Path:
+    """Create an output directory, optionally enforcing uniqueness per run."""
+    path = Path(p)
+
+    if not require_unique:
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    if not path.exists():
+        path.mkdir(parents=True, exist_ok=False)
+        return path
+
+    base_name = path.name
+    parent = path.parent
+    for idx in count(1):
+        candidate = parent / f"{base_name}_{idx:02d}"
+        if not candidate.exists():
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+
+    return path  # Fallback, though loop should always return
 
 def to_uint8(img: np.ndarray) -> np.ndarray:
     img = np.clip(img, 0.0, 1.0)
@@ -370,7 +390,11 @@ class FilmGrainGenerator:
                               flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
 
     def render(self, out_dir="grain_out", as_video=False, video_path="film_grain.mp4", fourcc_str="mp4v"):
-        ensure_dir(out_dir)
+        out_dir_path = prepare_output_directory(out_dir, require_unique=not as_video)
+        out_dir_str = str(out_dir_path)
+
+        if out_dir_str != out_dir:
+            print(f"Output directory '{out_dir}' exists. Using '{out_dir_str}' for this run.")
 
         # Tone curve LUT (kept in float via np.interp)
         x = np.linspace(0, 1, 1024, dtype=np.float32)
@@ -459,13 +483,15 @@ class FilmGrainGenerator:
                 writer.write(bgr8)
             else:
                 rgb8 = to_uint8(frame)
-                cv2.imwrite(os.path.join(out_dir, f"grain_{frame_index:0{digits}d}.png"),
+                cv2.imwrite(os.path.join(out_dir_str, f"grain_{frame_index:0{digits}d}.png"),
                             cv2.cvtColor(rgb8, cv2.COLOR_RGB2BGR))
 
             frame_index += 1
 
         if writer is not None:
             writer.release()
+
+        return out_dir_str
 
 # -------------------------
 # ffmpeg helper
@@ -559,14 +585,14 @@ def main():
                              coherence=args.coherence, regen_every=args.regen_every)
     if args.export == 'video':
         print(f"Exporting direct video to {args.video_path} (fourcc={args.codec})…")
-        gen.render(out_dir=args.outdir, as_video=True, video_path=args.video_path, fourcc_str=args.codec)
+        _ = gen.render(out_dir=args.outdir, as_video=True, video_path=args.video_path, fourcc_str=args.codec)
         print("Done.")
     else:
         print(f"Exporting PNG sequence to {args.outdir} …")
-        gen.render(out_dir=args.outdir, as_video=False)
+        actual_out_dir = gen.render(out_dir=args.outdir, as_video=False)
         print("PNG export done.")
         if args.ffmpeg != 'none':
-            out = maybe_encode_with_ffmpeg(args.outdir, args.fps, args.ffmpeg, ffmpeg_bin=args.ffmpeg_bin)
+            out = maybe_encode_with_ffmpeg(actual_out_dir, args.fps, args.ffmpeg, ffmpeg_bin=args.ffmpeg_bin)
             if out:
                 print(f"Encoded via ffmpeg → {out}")
 
