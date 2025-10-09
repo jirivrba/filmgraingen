@@ -7,13 +7,18 @@ CLI with PNG/video export and optional ffmpeg ProRes/H.264 encoding.
 This version generates a NEW grain realization for EVERY FRAME (like real film),
 with controllable temporal coherence so changes feel organic rather than harsh.
 
+The generator can now render **perfectly looping grain segments** using
+`--loop-seconds` and repeat them any number of times via `--loop-count`, making
+it easy to build long overlays without visible seams.
+
 Usage examples:
-  python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 --seconds 10 --film-sensitivity ASA200
+  python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 \
+      --loop-seconds 10 --loop-count 3 --film-sensitivity ASA200
   python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp4 \
-      --fps 24 --seconds 10 --film-sensitivity ASA200 --codec mp4v
+      --fps 24 --loop-seconds 10 --loop-count 2 --film-sensitivity ASA200 --codec mp4v
   # Encode PNGs to ProRes 422 HQ via ffmpeg (after generating PNGs into --outdir):
-  python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 --seconds 10 \
-      --ffmpeg prores422hq
+  python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 --loop-seconds 12 \
+      --loop-count 1 --ffmpeg prores422hq
 
 Author: prepared for Jirka
 """
@@ -226,7 +231,8 @@ class FilmGrainGenerator:
         },
     }
 
-    def __init__(self, width=3840, height=2160, fps=24, seconds=10,
+    def __init__(self, width=3840, height=2160, fps=24, loop_seconds=10,
+                 loop_count=1, seconds=None,
                  film_speed="ASA200", look="LOOK80S", seed=None,
                  coherence=0.3,  # 0=new every frame (chaotic), 0.3=organic, 0.6=smoother
                  regen_every=1    # regenerate master every N frames (1 = per-frame)
@@ -234,7 +240,13 @@ class FilmGrainGenerator:
         self.width = width
         self.height = height
         self.fps = fps
-        self.frames = int(round(fps * seconds))
+        # backwards compatibility: `seconds` overrides loop_seconds when provided
+        if seconds is not None:
+            loop_seconds = seconds
+        self.loop_seconds = max(0.01, float(loop_seconds))
+        self.loop_count = max(1, int(loop_count))
+        self.loop_frames = max(1, int(round(self.fps * self.loop_seconds)))
+        self.frames = self.loop_frames * self.loop_count
         self.film_speed = film_speed
         self.look = look
         self.rng = np.random.default_rng(seed)
@@ -371,16 +383,29 @@ class FilmGrainGenerator:
             fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
             writer = cv2.VideoWriter(video_path, fourcc, self.fps, (self.width, self.height))
 
-        # Initialize previous grain tiles for temporal coherence blending
-        prev_tiles = [self._generate_grain_tile_once(ch) for ch in range(3)]
+        # Pre-calculate digits for PNG naming when exporting long loops
+        digits = max(4, int(math.log10(self.frames))+1 if self.frames > 0 else 4)
 
-        for t in range(self.frames):
-            flicker, lift, dx, dy, rot, ux, uy = self._temporal_params(t)
-            frame = np.zeros((self.height, self.width, 3), np.float32)
+        # Store RNG state so we can re-run the same loop seamlessly
+        initial_rng_state = deepcopy(self.rng.bit_generator.state)
+        # Cache of the first frames (float16) used for end-of-loop blending
+        blend_frames = min(self.loop_frames, max(2, int(round(self.fps * 0.5))))
+        first_loop_cache = []
 
-            # Generate (or regenerate) tiles and blend with previous to control coherence
-            if t % self.regen_every == 0:
-                new_tiles = [self._generate_grain_tile_once(ch) for ch in range(3)]
+        frame_index = 0
+        for loop_idx in range(self.loop_count):
+            # Reset random generator to start-of-loop state
+            self.rng.bit_generator.state = deepcopy(initial_rng_state)
+            # Initialize previous grain tiles for temporal coherence blending
+            prev_tiles = [self._generate_grain_tile_once(ch) for ch in range(3)]
+
+            for t in range(self.loop_frames):
+                flicker, lift, dx, dy, rot, ux, uy = self._temporal_params(t)
+                frame = np.zeros((self.height, self.width, 3), np.float32)
+
+                # Generate (or regenerate) tiles and blend with previous to control coherence
+                if t % self.regen_every == 0:
+                    new_tiles = [self._generate_grain_tile_once(ch) for ch in range(3)]
             else:
                 new_tiles = prev_tiles  # between regen intervals, reuse (still moved by drift)
 
@@ -390,8 +415,8 @@ class FilmGrainGenerator:
                 prev_tiles[ch] = tile  # carry forward blended state (evolves over time)
 
                 # Apply slow drift (wrap) and gentle color tint per channel
-                tx = int(ux) % self.width
-                ty = int(uy) % self.height
+                tx = int(round(ux)) % self.width
+                ty = int(round(uy)) % self.height
                 shifted = np.roll(np.roll(tile, shift=ty, axis=0), shift=tx, axis=1)
                 tint = 0.92 + (0.16 * self.tint_strength) * (self.color_tint[..., ch] - 0.5)
                 layer = shifted * tint * self.warmth_shift[ch]
@@ -413,9 +438,20 @@ class FilmGrainGenerator:
             for ch in range(3):
                 frame[..., ch] = self._apply_affine(frame[..., ch], dx, dy, rot)
 
-            # Subtle per-frame sparkle to avoid banding/over-correlation
-            sparkle = np.random.default_rng().normal(0, 0.006, frame.shape).astype(np.float32)
+            # Subtle per-frame sparkle to avoid banding/over-correlation (deterministic per loop)
+            sparkle = self.rng.normal(0, 0.006, frame.shape).astype(np.float32)
             frame = np.clip(frame + sparkle, 0.0, 1.0)
+
+            # Cache first frames for blending at the end of the loop to guarantee seamless looping
+            if loop_idx == 0 and t < blend_frames:
+                first_loop_cache.append(frame.astype(np.float16, copy=True))
+
+            # Blend the tail of the loop back into the cached first frames (perfect loop)
+            if blend_frames > 0 and t >= self.loop_frames - blend_frames:
+                idx = t - (self.loop_frames - blend_frames)
+                alpha = (idx + 1) / float(blend_frames)
+                target = first_loop_cache[idx].astype(np.float32)
+                frame = frame * (1.0 - alpha) + target * alpha
 
             # Export
             if writer is not None:
@@ -423,8 +459,10 @@ class FilmGrainGenerator:
                 writer.write(bgr8)
             else:
                 rgb8 = to_uint8(frame)
-                cv2.imwrite(os.path.join(out_dir, f"grain_{t:04d}.png"),
+                cv2.imwrite(os.path.join(out_dir, f"grain_{frame_index:0{digits}d}.png"),
                             cv2.cvtColor(rgb8, cv2.COLOR_RGB2BGR))
+
+            frame_index += 1
 
         if writer is not None:
             writer.release()
@@ -481,7 +519,12 @@ def parse_args():
     p.add_argument('--width', type=int, default=3840)
     p.add_argument('--height', type=int, default=2160)
     p.add_argument('--fps', type=int, default=24)
-    p.add_argument('--seconds', type=float, default=10)
+    p.add_argument('--loop-seconds', type=float, default=None,
+                   help='Length of one seamless grain loop (seconds).')
+    p.add_argument('--loop-count', type=int, default=1,
+                   help='How many times to repeat the seamless loop in the export.')
+    p.add_argument('--seconds', type=float, default=None,
+                   help='[Deprecated] Alias for --loop-seconds for backwards compatibility.')
     p.add_argument('--film-sensitivity', '--preset', dest='film_speed',
                    choices=sorted(FilmGrainGenerator.FILM_SPEEDS.keys()),
                    default='ASA200',
@@ -508,8 +551,11 @@ def parse_args():
 
 def main():
     args = parse_args()
+    loop_seconds = args.loop_seconds if args.loop_seconds is not None else (
+        args.seconds if args.seconds is not None else 10.0)
     gen = FilmGrainGenerator(width=args.width, height=args.height, fps=args.fps,
-                             seconds=args.seconds, film_speed=args.film_speed, look=args.look, seed=args.seed,
+                             loop_seconds=loop_seconds, loop_count=args.loop_count, seconds=None,
+                             film_speed=args.film_speed, look=args.look, seed=args.seed,
                              coherence=args.coherence, regen_every=args.regen_every)
     if args.export == 'video':
         print(f"Exporting direct video to {args.video_path} (fourcc={args.codec})…")

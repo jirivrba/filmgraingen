@@ -42,19 +42,23 @@ The grain is **different in every frame** (no static texture), creating a realis
 
 ### Generate PNG sequence (recommended for ProRes)
 ```bash
-python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 --seconds 10 --film-sensitivity ASA200
+python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 \
+    --loop-seconds 10 --loop-count 3 --film-sensitivity ASA200
 ```
+This command creates a **10-second seamless grain loop** and repeats it 3 times
+in the PNG sequence (30 seconds total, 720 frames at 24 fps) without any
+visible seams between loops.
 
 ### Encode PNGs to ProRes 422 HQ
 ```bash
-python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 --seconds 10 \
-    --film-sensitivity ASA200 --ffmpeg prores422hq
+python3 film_grain_generator_cli.py --export png --outdir grain_png --fps 24 \
+    --loop-seconds 8 --loop-count 2 --film-sensitivity ASA200 --ffmpeg prores422hq
 ```
 
 ### Direct video export (MP4/H.264)
 ```bash
 python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp4 \
-    --fps 24 --seconds 10 --film-sensitivity ASA200 --codec mp4v
+    --fps 24 --loop-seconds 6 --loop-count 4 --film-sensitivity ASA200 --codec mp4v
 ```
 
 ---
@@ -63,7 +67,9 @@ python3 film_grain_generator_cli.py --export video --video-path film_grain_4k.mp
 
 - `--width` / `--height`: Output resolution (default 3840x2160).
 - `--fps`: Frames per second (default 24).
-- `--seconds`: Length of the sequence (default 10s).
+- `--loop-seconds`: Length of a single seamless loop (seconds, default 10s if not set).
+- `--loop-count`: How many times the loop is repeated in the output (default 1).
+- `--seconds`: Deprecated alias for `--loop-seconds` to maintain backwards compatibility.
 - `--film-sensitivity`: ASA stock (`ASA100`, `ASA125`, `ASA200`, `ASA400`, `ASA500`, `ASA800`).
 - `--look`: Era styling (`LOOK80S` default, `LOOK70S` for warmer, chunkier 1970s feel).
 - `--coherence`: Temporal coherence (0=every frame very different, 0.3=natural, 0.6=smoother evolution).
