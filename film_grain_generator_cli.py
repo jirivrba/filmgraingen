@@ -27,8 +27,6 @@ Author: prepared for Jirka
 import os
 import math
 import cv2
-import sys
-import json
 import argparse
 import subprocess
 import shutil
@@ -36,7 +34,6 @@ import numpy as np
 from copy import deepcopy
 from itertools import count
 from pathlib import Path
-from typing import Tuple
 
 
 BASE_FILM_PROFILES = {
@@ -113,20 +110,6 @@ def prepare_output_directory(p: str, require_unique: bool = True) -> Path:
 def to_uint8(img: np.ndarray) -> np.ndarray:
     img = np.clip(img, 0.0, 1.0)
     return (img * 255.0 + 0.5).astype(np.uint8)
-
-def gaussian_blob(h, w, cx, cy, sigma_x, sigma_y, amplitude=1.0):
-    """Draw a single Gaussian blob (grain clump) into a local ROI for speed."""
-    radx = int(3*sigma_x) + 1
-    rady = int(3*sigma_y) + 1
-    x0 = max(0, int(cx) - radx); x1 = min(w, int(cx) + radx + 1)
-    y0 = max(0, int(cy) - rady); y1 = min(h, int(cy) + rady + 1)
-    if x0 >= x1 or y0 >= y1:
-        return None, None, None
-    xs = np.arange(x0, x1) - cx
-    ys = np.arange(y0, y1) - cy
-    X, Y = np.meshgrid(xs, ys)
-    g = amplitude * np.exp(-0.5*((X/sigma_x)**2 + (Y/sigma_y)**2))
-    return g, (y0, y1), (x0, x1)
 
 def fbm_fractal_noise(shape, octaves=4, base_freq=1/128, persistence=0.5, seed=None):
     """Fast fBm-like band-limited field used to modulate clumping and tint."""
@@ -257,6 +240,7 @@ class FilmGrainGenerator:
                  film_speed="ASA200", look="LOOK80S", seed=None,
                  coherence=0.3,  # 0=new every frame (chaotic), 0.3=organic, 0.6=smoother
                  regen_every=1,    # regenerate master every N frames (1 = per-frame)
+                 grain_scale=None,  # render grain at lower resolution for speed (None=auto)
                  debug=False
                  ):
         self.width = width
@@ -276,6 +260,9 @@ class FilmGrainGenerator:
         self.um_per_px = (self.GATE_WIDTH_MM * 1000.0) / float(self.width)  # ~5.7 µm/px @ 3840
         self.coherence = float(np.clip(coherence, 0.0, 0.95))
         self.regen_every = max(1, int(regen_every))
+        if grain_scale is None:
+            grain_scale = 0.5 if max(self.width, self.height) >= 2560 else 0.75
+        self.grain_scale = float(np.clip(grain_scale, 0.25, 1.0))
         if self.film_speed not in self.FILM_STOCK_PROFILES:
             raise ValueError(f"Unknown film sensitivity preset: {self.film_speed}")
         if self.look not in self.LOOK_PRESETS:
@@ -305,11 +292,12 @@ class FilmGrainGenerator:
             raise ValueError("channel_mul_scale must be a triple of multipliers")
         self._debug(
             "Initialized generator: %dx%d @ %dfps, loop %.2fs x%d (total frames %d), "
-            "film %s, look %s, coherence %.2f, regen_every %d"
+            "film %s, look %s, coherence %.2f, regen_every %d, grain_scale %.2f"
             % (
                 self.width, self.height, self.fps,
                 self.loop_seconds, self.loop_count, self.total_frames,
                 self.film_speed, self.look, self.coherence, self.regen_every,
+                self.grain_scale,
             )
         )
         self._prepare_static_fields()
@@ -320,15 +308,21 @@ class FilmGrainGenerator:
 
     def _prepare_static_fields(self):
         """Static modulation fields shared across frames: clump modulation, tint, vignette."""
-        self.clump_mod = fbm_fractal_noise((self.height, self.width),
+        noise_h = max(8, int(round(self.height * self.grain_scale)))
+        noise_w = max(8, int(round(self.width * self.grain_scale)))
+        clump_small = fbm_fractal_noise((noise_h, noise_w),
                                            octaves=4, base_freq=1/256,
                                            persistence=0.55,
                                            seed=self.rng.integers(1<<30))
-        self.color_tint = np.stack([
-            fbm_fractal_noise((self.height, self.width), octaves=3, base_freq=1/512,
+        self.clump_mod = cv2.resize(clump_small, (self.width, self.height),
+                                    interpolation=cv2.INTER_CUBIC).astype(np.float32)
+        tint_small = np.stack([
+            fbm_fractal_noise((noise_h, noise_w), octaves=3, base_freq=1/512,
                               persistence=0.6, seed=self.rng.integers(1<<30))
             for _ in range(3)
         ], axis=-1)
+        self.color_tint = cv2.resize(tint_small, (self.width, self.height),
+                                     interpolation=cv2.INTER_CUBIC).astype(np.float32)
         yy, xx = np.mgrid[0:self.height, 0:self.width]
         nx = (xx - self.width/2) / (self.width/2)
         ny = (yy - self.height/2) / (self.height/2)
@@ -343,24 +337,15 @@ class FilmGrainGenerator:
             )
         )
 
-    def _sample_size_pixels(self, diam_range_um):
-        lo, hi = diam_range_um
-        mu = math.log((lo*hi)**0.5)
-        sigma = 0.25
-        diam_um = np.exp(self.rng.normal(mu, sigma))
-        diam_um = float(np.clip(diam_um, lo, hi))
-        diam_px = max(0.8, diam_um / self.um_per_px)
-        sigma_px = diam_px / 2.355
-        return diam_px, sigma_px
-
     def _generate_grain_tile_once(self, channel_index: int) -> np.ndarray:
-        """Generate one stochastic clumpy grain tile for a single color channel (float 0..1)."""
-        h, w = self.height, self.width
-        base = np.zeros((h, w), np.float32)
+        """Generate a fast stochastic grain tile (float 0..1) using band-limited noise."""
+        full_h, full_w = self.height, self.width
+        h = max(8, int(round(full_h * self.grain_scale)))
+        w = max(8, int(round(full_w * self.grain_scale)))
         diam_range_um = tuple(d * self.diameter_scale for d in self.stock_cfg["diam_um_range"])
-        density = (self.stock_cfg["density_Mpx"] * self.density_scale *
-                   self.stock_cfg["channel_mul"][channel_index] * self.channel_mul_scale[channel_index])
-        total_grains = int(density * (w*h/1e6))
+        density = float(self.stock_cfg["density_Mpx"] * self.density_scale *
+                        self.stock_cfg["channel_mul"][channel_index] * self.channel_mul_scale[channel_index])
+        density_scale = np.clip(density / 5000.0, 0.6, 1.6)
         self._debug(
             "Channel %d tile: diam range %.2f-%.2fµm (scale %.2f), target grains %d"
             % (
@@ -368,39 +353,32 @@ class FilmGrainGenerator:
                 diam_range_um[0],
                 diam_range_um[1],
                 self.diameter_scale,
-                total_grains,
+                int(density),
             )
         )
 
-        # Stratified positions ~ Poisson-disk-ish using jittered grid
-        grid = int(max(64, round(math.sqrt(total_grains))))
-        gx = np.linspace(0, w-1, grid, endpoint=True)
-        gy = np.linspace(0, h-1, grid, endpoint=True)
-        cand = self.rng.choice(grid*grid, size=min(total_grains, grid*grid), replace=False)
-        xs_idx = cand % grid
-        ys_idx = cand // grid
+        lo_um, hi_um = diam_range_um
+        mu = math.log((lo_um * hi_um) ** 0.5)
+        sigma = 0.25
+        diam_um = float(np.clip(np.exp(self.rng.normal(mu, sigma)), lo_um, hi_um))
+        diam_px = max(0.8, diam_um / self.um_per_px) * self.grain_scale
+        sigma_px = max(0.4, diam_px / 2.355)
 
-        for i in range(len(xs_idx)):
-            cx = gx[xs_idx[i]] + self.rng.uniform(-0.5, 0.5) * (w/(grid-1))
-            cy = gy[ys_idx[i]] + self.rng.uniform(-0.5, 0.5) * (h/(grid-1))
-            _, sigma_px = self._sample_size_pixels(diam_range_um)
-            aspect = 1.0 + self.rng.uniform(-0.25, 0.25)
-            sx = max(0.3, sigma_px * aspect)
-            sy = max(0.3, sigma_px / aspect)
-            mod = 0.6 + 0.8*(1.0 - self.clump_mod[int(cy)%h, int(cx)%w])
-            amp = self.rng.uniform(0.6, 1.2) * mod * 0.9
-            g, yr, xr = gaussian_blob(h, w, cx, cy, sx, sy, amplitude=amp)
-            if g is not None:
-                base[yr[0]:yr[1], xr[0]:xr[1]] += g
+        base = self.rng.normal(0.0, 1.0, (h, w)).astype(np.float32)
+        base = cv2.GaussianBlur(base, (0, 0), sigmaX=sigma_px, sigmaY=sigma_px)
 
-        # Band-limited micro noise (silver-halide feel)
-        bln = fbm_fractal_noise((h, w), octaves=5, base_freq=1/512,
-                                persistence=0.55, seed=self.rng.integers(1<<30))
-        base = base + 0.6*bln
+        clump = self.rng.normal(0.0, 1.0, (h, w)).astype(np.float32)
+        clump = cv2.GaussianBlur(clump, (0, 0), sigmaX=sigma_px * 3.0, sigmaY=sigma_px * 3.0)
+        clump = (clump - clump.min()) / (clump.max() - clump.min() + 1e-6)
+        base *= 0.65 + 0.7 * (1.0 - clump)
 
-        # Optics/scanner slight blur and normalization
-        base = cv2.GaussianBlur(base, (3,3), 0.8)
+        micro = self.rng.normal(0.0, 0.6, (h, w)).astype(np.float32)
+        micro = cv2.GaussianBlur(micro, (0, 0), sigmaX=max(0.4, sigma_px * 0.4),
+                                 sigmaY=max(0.4, sigma_px * 0.4))
+        base = base * density_scale + micro * 0.35
+
         base = (base - base.min()) / (base.max() - base.min() + 1e-8)
+        base = cv2.resize(base, (full_w, full_h), interpolation=cv2.INTER_CUBIC)
         self._debug(
             "Channel %d tile prepared (min %.3f max %.3f)"
             % (channel_index, float(base.min()), float(base.max()))
@@ -514,9 +492,8 @@ class FilmGrainGenerator:
                 shadow_boost = 1.0 + (0.35 * self.shadow_boost_strength)*(1.0 - luma)
                 frame *= shadow_boost[..., None]
 
-                # Gate weave (subpixel jitter + micro-rotation per channel)
-                for ch in range(3):
-                    frame[..., ch] = self._apply_affine(frame[..., ch], dx, dy, rot)
+                # Gate weave (subpixel jitter + micro-rotation)
+                frame = self._apply_affine(frame, dx, dy, rot)
 
                 # Subtle per-frame sparkle to avoid banding/over-correlation (deterministic per loop)
                 sparkle = self.rng.normal(0, 0.006, frame.shape).astype(np.float32)
@@ -638,6 +615,8 @@ def parse_args():
                    help='Temporal coherence 0..0.95 (higher = smoother, lower = more different per frame)')
     p.add_argument('--regen-every', type=int, default=1,
                    help='Regenerate a fresh grain tile every N frames (1=every frame).')
+    p.add_argument('--grain-scale', type=float, default=None,
+                   help='Render grain at lower resolution for speed (0.25..1.0, default=auto).')
 
     p.add_argument('--export', choices=['png','video'], default='png', help='PNG sequence or direct video via OpenCV')
     p.add_argument('--outdir', default='grain_out', help='Directory for PNGs (and encoded files)')
@@ -661,6 +640,7 @@ def main():
                              loop_seconds=loop_seconds, loop_count=args.loop_count, seconds=None,
                              film_speed=args.film_speed, look=args.look, seed=args.seed,
                              coherence=args.coherence, regen_every=args.regen_every,
+                             grain_scale=args.grain_scale,
                              debug=args.debug)
     if args.export == 'video':
         print(f"Exporting direct video to {args.video_path} (fourcc={args.codec})…")
